@@ -1,0 +1,75 @@
+﻿//这个整体是为了做MIPMAP的 做多层的话可以For循环再Pingpong进行多层进行 这个也可以推广到颜色 ，稍微改一下参数就行
+#pragma kernel BuildMaxMinByMap //一个用来初始化 使用HeightMap 初始化
+#pragma kernel BuildMaxMinByMaxMinMap //这个用于迭代 使用InputOutput来 计算
+
+Texture2D<float> readMap;//用于读取数据的Map，可以用去做比较
+Texture2D<float2> InputMap;
+RWTexture2D<float2> OutputMap;
+
+uint2 srcTexSize;
+uint2 destTexSize;
+
+[numthreads(16,16,1)]
+void BuildMaxMinByMap(uint3 id : SV_DispatchThreadID)
+{
+    //为了得到输入的像素格每一格的大小 比如1024x1024 到 256x256 那pixelSize = 4x4; 一格需要遍历4x4 格大小
+    float2 pixelSize = srcTexSize * 1.0f / srcTexSize;
+    
+    uint2 pixelXY = id.xy;
+    int2 headXY = floor(pixelXY * pixelSize); //相当于2x2 格子的左上角
+    int2 endXY = floor((pixelXY + 1) * pixelSize); //左下角
+    
+    headXY = clamp(headXY, int2(0, 0), srcTexSize);
+    endXY = clamp(endXY, int2(0, 0), srcTexSize); //限制范围
+    
+    float minNum = 65536; //默认最大数
+    float maxNum = -65536;
+    
+    for (int i = headXY.x; i < endXY.x; i++)
+    {
+        for (int j = headXY.y; j < endXY.y; j++)
+        {
+            uint3 sameXY = uint3(i, j, 0);
+            float readNum = readMap.Load(sameXY); //这个是读数据 根据需求调整。 
+            maxNum = max(maxNum, readNum);
+            minNum = min(minNum, readNum);
+
+        }
+
+    }
+    
+    OutputMap[id.xy] = float2(minNum, maxNum);
+}
+
+[numthreads(16, 16, 1)]
+void BuildMaxMinByMaxMinMap(uint3 id : SV_DispatchThreadID)
+{
+    //迭代的时候就以2x2的格数来计算。
+    float2 pixelSize = float2(2, 2);
+    
+    uint2 pixelXY = id.xy;
+    int2 headXY = floor(pixelXY * pixelSize); //相当于2x2 格子的左上角
+    int2 endXY = floor((pixelXY + 1) * pixelSize); //左下角
+    
+    headXY = clamp(headXY, int2(0, 0), srcTexSize);
+    endXY = clamp(endXY, int2(0, 0), srcTexSize); //限制范围
+    
+    float minNum = 65536; //默认最大数
+    float maxNum = -65536;
+    
+    for (int i = headXY.x; i < endXY.x; i++)
+    {
+        for (int j = headXY.y; j < endXY.y; j++)
+        {
+            uint3 sameXY = uint3(i, j, 0);
+            float2 readNum = InputMap.Load(sameXY); //这个是读数据 根据需求调整。 
+            maxNum = max(maxNum, readNum.x);
+            minNum = min(minNum, readNum.y);
+
+        }
+
+    }
+    
+    OutputMap[id.xy] = float2(minNum, maxNum);
+}
+

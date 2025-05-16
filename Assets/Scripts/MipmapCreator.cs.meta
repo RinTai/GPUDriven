@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 6a8c47f1697de1845899bf0568d8cb15
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - m_ViewDataDictionary: {instanceID: 0}
+  - heightMap: {fileID: 10300, guid: 0000000000000000f000000000000000, type: 0}
+  - outputRT: {instanceID: 0}
+  - mipmapCreatorCS: {fileID: 7200000, guid: 62d8a2814062c5542910767000648fc1, type: 3}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 

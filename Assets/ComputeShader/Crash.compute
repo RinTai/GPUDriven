@@ -1,0 +1,29 @@
+﻿#pragma kernel CrashCS
+
+struct Vertex
+{
+    float3 position;
+};//顶点的数据
+
+RWStructuredBuffer<Vertex> WallVertexData; //墙壁的顶点数据
+RWStructuredBuffer<Vertex> DamagerShapeData;//破坏效果的顶点数据
+int WallVertexCount; //顶点数
+int DamageShapeVertexCount;//顶点数
+
+// 输出：标记被破坏的顶点（1=被破坏，0=保留）
+RWStructuredBuffer<int> DestroyedFlags;
+
+bool isPointInPolygon(float2 vertex, StructuredBuffer<float2> polygon, int vertexCount)
+{
+    //做检测，检测墙壁中的订单是否在几何体中
+    return false;
+}
+
+/*先把破坏的形状分割为 n个三角形，然后通过三角形和顶点进行判断得到墙上的该点是否应该被舍弃，生成新的拓扑结构，得到最终的Mesh，或者说标记顶点进行删除？但是我还是要重建模型的*/
+[numthreads(64,1,1)]
+void CrashCS(uint3 id : SV_DispatchThreadID)
+{
+
+    
+    
+}

@@ -1,0 +1,145 @@
+﻿#pragma kernel InitialBuffer
+#pragma kernel InterBuffer
+
+#pragma enable_d3d11_debug_symbols
+
+#include "./DataStructDefine.hlsl"
+#include "./NodeFunc.hlsl"
+
+//就是相当于一个全局变量 为什么不用SSBO 因为兼容性不太好
+uniform float4 globalValueList[10];
+
+ConsumeStructuredBuffer<uint> _ConsumeList; //这个是当前遍历的节点
+AppendStructuredBuffer<uint> _AppendList; //这个是细分后的节点放进去 这里会用到 PingPong 来传回_ConsumeList
+AppendStructuredBuffer<uint> _FinalList;//这个是不需要细分的节点
+
+Texture2D<float2> MinMaxHeightMap;
+SamplerState sampler_MinMaxHeightMap;
+
+uint EncodeXYLOD(in uint x, in uint y, in uint LOD)
+{
+    return x << 16 | y << 4 | LOD;
+}
+
+void DecodeXYLOD(uint xzLOD, out uint x, out uint y, out uint LOD)
+{
+    x = (xzLOD >> 16) & 0xFFFF; //x右移16位占32 - 16 16位
+    y = (xzLOD >> 4) & 0xFFF; //z 占16 - 4 12位
+    LOD = xzLOD & 0xF; //LOD4 - 0 四位
+}
+
+uint IsNeedQuad(GlobalValue gvalue ,uint x, uint y, uint LOD , float maxHeight)
+{
+    uint2 xy = uint2(x, y);
+    if(LOD == 0)
+    {
+        return 0;
+    }
+    
+    float3 cameraWPos = gvalue.cameraWorldPos;
+    float fov = gvalue.fov;
+    float nodeSize = GetNodeSizeInLOD(gvalue, LOD);
+    float2 nodePos = GetNodeCenterPos(gvalue, xy , LOD);
+    int2 cameraNodeXY = GetCamearaNodeXY(gvalue, cameraWPos, LOD, float3(0, 0, 0));
+    float dis = distance(nodePos, float2(cameraWPos.x, cameraWPos.z));
+    float result = gvalue.LodJudgeFactor * nodeSize / (dis * fov);
+    return step(1, dis);
+}
+
+
+//这个是为了计算出当前节点的边界范围 AABB盒
+void CalNodeBoundPos(GlobalValue gvalue, uint2 nodeXY, uint LOD,out float3 minPos,out float3 maxPos)
+{
+    float2 height = MinMaxHeightMap.SampleLevel(sampler_MinMaxHeightMap, nodeXY, LOD).xy;
+    float2 minMaxHeight = (height - 0.5f) * 2; //* gvalue.worldHeightScale;
+    float nodeSize = GetNodeSizeInLOD(gvalue, LOD);
+    float2 nodeCenter = GetNodeCenterPos(gvalue, nodeXY, LOD);
+    maxPos = float3(nodeSize * 0.5f + nodeCenter.x, minMaxHeight.y, nodeSize * 0.5f  + nodeCenter.y);
+    minPos = float3(nodeSize * -0.5f + nodeCenter.x, minMaxHeight.x, nodeSize * -0.5f + nodeCenter.y);
+}
+
+bool IsOutSidePlane(float4 plane, float3 position)
+{
+    return dot(plane.xyz, position) + plane.w < 0;
+}
+
+//视锥体剔除（直接用六个float4 来表示 每个float4里面存的都是 每个面的法线）
+uint FrustumCullBound(float3 minPos, float3 maxPos, float4 planes[6])
+{
+    [unroll]
+    for (int i = 0; i < 6; i++)
+    {
+        float3 p = minPos;
+        float3 normal = planes[i].xyz;
+        if (normal.x >= 0) 
+            p.x = maxPos.x;
+        if (normal.y >= 0)
+            p.y = maxPos.y;
+        if (normal.z >= 0)
+            p.z = maxPos.z;
+        if (IsOutSidePlane(planes[i], p))
+        {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+//这里是得到基础的 这个思路写在这里 ，对每一层Mipmap的范围进行Dispatch ，相当于是4x4的Mip5 我们对他的其中一格进行如下的计算
+[numthreads(1,1,1)]
+void InitialBuffer(uint3 id : SV_DispatchThreadID)
+{
+    GlobalValue gvalue = GetGlobalValue(globalValueList);
+    
+    uint x = id.x % GetNodeNumInLOD(gvalue, gvalue.MAX_LOD);
+    uint y = id.x / GetNodeNumInLOD(gvalue, gvalue.MAX_LOD);
+    uint tempValue = EncodeXYLOD(x, y, gvalue.MAX_LOD);
+    _AppendList.Append(tempValue);
+}
+
+[numthreads(1,1,1)] //实际上是可以跨线程运行的
+void InterBuffer(uint3 id : SV_DispatchThreadID)
+{
+    GlobalValue gvalue = GetGlobalValue(globalValueList);
+    uint tempId = _ConsumeList.Consume();
+    
+    uint x, y, LOD;
+    DecodeXYLOD(tempId, x, y, LOD);
+    uint2 nodeXY = uint2(x, y);
+
+    float3 minPos, maxPos;
+    CalNodeBoundPos(gvalue, nodeXY, LOD, minPos, maxPos);
+    
+    float4 frustumPlanes[6];
+    GetFrustumPlane(globalValueList,frustumPlanes);
+    
+    if(FrustumCullBound(minPos,maxPos,frustumPlanes) != 1)
+    {
+        tempId = 0;
+    }
+    //如果说要进行细分， 那么我就把他进行细分； 就是拆成2x2 然后放进AppendList 里
+        if (IsNeedQuad(gvalue, x, y, LOD, 1) == 1)
+        {
+            uint node0, node1, node2, node3;
+            uint nextLOD = LOD - 1;
+            node0 = EncodeXYLOD(x * 2, y * 2, nextLOD);
+            node1 = EncodeXYLOD(x * 2, y * 2 + 1, nextLOD);
+            node2 = EncodeXYLOD(x * 2 + 1, y * 2, nextLOD);
+            node3 = EncodeXYLOD(x * 2 + 1, y * 2 + 1, nextLOD);
+        
+            _AppendList.Append(node0);
+            _AppendList.Append(node1);
+            _AppendList.Append(node2);
+            _AppendList.Append(node3);
+        
+        }
+        else
+        {
+            if (tempId != 0)
+            { //如果说不进行细分，那么我就把他直接放近FinalList 里，结束了    
+                _FinalList.Append(tempId);
+            }
+        }
+    }
+
+
