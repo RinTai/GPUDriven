@@ -1,10 +1,15 @@
-﻿#pragma kernel InitialBuffer
+﻿#pragma kernel InitialHiZ
+#pragma kernel InterHiZ
+#pragma kernel InitialBuffer
 #pragma kernel InterBuffer
+#pragma kernel Output
 
 #pragma enable_d3d11_debug_symbols
 
 #include "./DataStructDefine.hlsl"
 #include "./NodeFunc.hlsl"
+
+// ———————————————————————————————————————————————————— //  普通的剔除部分
 
 //就是相当于一个全局变量 为什么不用SSBO 因为兼容性不太好
 uniform float4 globalValueList[10];
@@ -13,8 +18,25 @@ ConsumeStructuredBuffer<uint> _ConsumeList; //这个是当前遍历的节点
 AppendStructuredBuffer<uint> _AppendList; //这个是细分后的节点放进去 这里会用到 PingPong 来传回_ConsumeList
 AppendStructuredBuffer<uint> _FinalList;//这个是不需要细分的节点
 
+ConsumeStructuredBuffer<uint> _TempList; //零食存放的顶点
+
+RWTexture2D<float> _CullingResult; //写为纹理用作通用的输出
 Texture2D<float2> MinMaxHeightMap;
 SamplerState sampler_MinMaxHeightMap;
+
+// ———————————————————————————————————————————————————— // HiZ的生成部分
+Texture2D<float> _CameraDepthTexture;
+    
+uint HiZWidth;
+uint HiZHeight;
+uint _CurrentMipIndex;
+
+float2 _CameraDepthSize;
+    
+RWTexture2D<float> _HiZSrcDepthMip; //Mip之前的图片
+RWTexture2D<float> _HiZDestDepthMip; //Mip之后的图片
+// ———————————————————————————————————————————————————— // 
+
 
 uint EncodeXYLOD(in uint x, in uint y, in uint LOD)
 {
@@ -43,19 +65,18 @@ uint IsNeedQuad(GlobalValue gvalue ,uint x, uint y, uint LOD , float maxHeight)
     int2 cameraNodeXY = GetCamearaNodeXY(gvalue, cameraWPos, LOD, float3(0, 0, 0));
     float dis = distance(nodePos, float2(cameraWPos.x, cameraWPos.z));
     float result = gvalue.LodJudgeFactor * nodeSize / (dis * fov);
-    return step(1, dis);
+    return 1-step(5, dis);
 }
 
-
-//这个是为了计算出当前节点的边界范围 AABB盒
+//这个是为了计算出当前节点的边界范围 AABB盒 最近点和最远点
 void CalNodeBoundPos(GlobalValue gvalue, uint2 nodeXY, uint LOD,out float3 minPos,out float3 maxPos)
 {
     float2 height = MinMaxHeightMap.SampleLevel(sampler_MinMaxHeightMap, nodeXY, LOD).xy;
     float2 minMaxHeight = (height - 0.5f) * 2; //* gvalue.worldHeightScale;
     float nodeSize = GetNodeSizeInLOD(gvalue, LOD);
     float2 nodeCenter = GetNodeCenterPos(gvalue, nodeXY, LOD);
-    maxPos = float3(nodeSize * 0.5f + nodeCenter.x, minMaxHeight.y, nodeSize * 0.5f  + nodeCenter.y);
-    minPos = float3(nodeSize * -0.5f + nodeCenter.x, minMaxHeight.x, nodeSize * -0.5f + nodeCenter.y);
+    maxPos = float3(nodeSize * 0.5f + nodeCenter.x, 0, nodeSize * 0.5f  + nodeCenter.y); //高度问题导致了 视锥体近的部分会额外剔除一些 这个怎么解决呢？ 
+    minPos = float3(nodeSize * -0.5f + nodeCenter.x, 0, nodeSize * -0.5f + nodeCenter.y);
 }
 
 bool IsOutSidePlane(float4 plane, float3 position)
@@ -66,24 +87,35 @@ bool IsOutSidePlane(float4 plane, float3 position)
 //视锥体剔除（直接用六个float4 来表示 每个float4里面存的都是 每个面的法线）
 uint FrustumCullBound(float3 minPos, float3 maxPos, float4 planes[6])
 {
+    int temp = 0;
     [unroll]
     for (int i = 0; i < 6; i++)
     {
-        float3 p = minPos;
+        float3 pNear = minPos;
+        float3 pFar = maxPos;
         float3 normal = planes[i].xyz;
         if (normal.x >= 0) 
-            p.x = maxPos.x;
+            pNear.x = maxPos.x;
         if (normal.y >= 0)
-            p.y = maxPos.y;
+            pNear.y = maxPos.y;
         if (normal.z >= 0)
-            p.z = maxPos.z;
-        if (IsOutSidePlane(planes[i], p))
+            pNear.z = maxPos.z;
+        
+        if (normal.x >= 0) 
+            pFar.x = minPos.x;
+        if (normal.y >= 0)
+            pFar.y = minPos.y;
+        if (normal.z >= 0)
+            pFar.z = minPos.z;
+        
+        if (IsOutSidePlane(planes[i], pNear) && IsOutSidePlane(planes[i],pFar))
         {
             return 0;
         }
     }
     return 1;
 }
+
 
 //这里是得到基础的 这个思路写在这里 ，对每一层Mipmap的范围进行Dispatch ，相当于是4x4的Mip5 我们对他的其中一格进行如下的计算
 [numthreads(1,1,1)]
@@ -111,35 +143,105 @@ void InterBuffer(uint3 id : SV_DispatchThreadID)
     CalNodeBoundPos(gvalue, nodeXY, LOD, minPos, maxPos);
     
     float4 frustumPlanes[6];
-    GetFrustumPlane(globalValueList,frustumPlanes);
+    GetFrustumPlane(globalValueList, frustumPlanes);
     
-    if(FrustumCullBound(minPos,maxPos,frustumPlanes) != 1)
+    uint isFrustumCull = 0;
+    isFrustumCull = FrustumCullBound(minPos, maxPos, frustumPlanes);
+    if (isFrustumCull != 1)
     {
         tempId = 0;
     }
+
+
+    //这里做Hiz剔除
     //如果说要进行细分， 那么我就把他进行细分； 就是拆成2x2 然后放进AppendList 里
-        if (IsNeedQuad(gvalue, x, y, LOD, 1) == 1)
-        {
-            uint node0, node1, node2, node3;
-            uint nextLOD = LOD - 1;
-            node0 = EncodeXYLOD(x * 2, y * 2, nextLOD);
-            node1 = EncodeXYLOD(x * 2, y * 2 + 1, nextLOD);
-            node2 = EncodeXYLOD(x * 2 + 1, y * 2, nextLOD);
-            node3 = EncodeXYLOD(x * 2 + 1, y * 2 + 1, nextLOD);
+    uint isNeedQuad = 0;
+    isNeedQuad = IsNeedQuad(gvalue, x, y, LOD, 1);
+    if (isNeedQuad == 1)
+    {
+        uint node0, node1, node2, node3;
+        uint nextLOD = LOD - 1;
+        node0 = EncodeXYLOD(x * 2, y * 2, nextLOD);
+        node1 = EncodeXYLOD(x * 2, y * 2 + 1, nextLOD);
+        node2 = EncodeXYLOD(x * 2 + 1, y * 2, nextLOD);
+        node3 = EncodeXYLOD(x * 2 + 1, y * 2 + 1, nextLOD);
         
-            _AppendList.Append(node0);
-            _AppendList.Append(node1);
-            _AppendList.Append(node2);
-            _AppendList.Append(node3);
+        _AppendList.Append(node0);
+        _AppendList.Append(node1);
+        _AppendList.Append(node2);
+        _AppendList.Append(node3);
         
-        }
-        else
-        {
-            if (tempId != 0)
-            { //如果说不进行细分，那么我就把他直接放近FinalList 里，结束了    
-                _FinalList.Append(tempId);
-            }
+    }
+    else
+    {
+        if (tempId != 0)
+        { //如果说不进行细分，那么我就把他直接放近FinalList 里，结束了    
+            _FinalList.Append(tempId);
         }
     }
+}
+
+[numthreads(1,1,1)]
+void Output(uint3 id : SV_DispatchThreadID)
+{
+    uint currentNode = _TempList.Consume();
+    
+    uint cullResultID = id.x * 2;
+    uint seamMaskID = id.x * 2 + 1;
+
+    _CullingResult[uint2(cullResultID, id.y)] = currentNode;
+}
+
+float GetHiZDepeth2x2(float depth0, float depth1, float depth2, float depth3)
+{
+    return max(max(depth0, depth1), max(depth2, depth3));
+}
+
+
+[numthreads(8, 8, 1)]
+void InitialHiZ(uint3 id : SV_DispatchThreadID)
+{
+    //边界处理
+    if (id.x >= HiZWidth || id.y >= HiZHeight)
+    {
+        return;
+    }
+    
+    uint2 srcXY = floor(id.xy * 1.0 * _CameraDepthSize.xy / float2(HiZWidth, HiZHeight));
+      
+    #if UNITY_UV_STARTS_AT_TOP
+        srcXYy = 1.0 - srcXYy;  // 翻转 Y 轴
+    #endif
+
+    
+    float depth = _CameraDepthTexture.Load(uint3(srcXY, 0));
+    
+    #if UNITY_REVERSED_Z
+    depth = 1.0 - depth;
+    #endif
+    
+
+    _HiZDestDepthMip[id.xy] = depth;
+}
+
+[numthreads(8, 8, 1)]
+void InterHiZ(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= HiZWidth || id.y >= HiZHeight)
+    {
+        return;
+    }
+    
+    uint2 srxXY0 = id.xy << 1; //*2
+    float depth0 = _HiZSrcDepthMip.Load(uint3(srxXY0, _CurrentMipIndex)).x;
+    uint2 srxXY1 = id.xy * 2 + uint2(1, 0); //*2
+    float depth1 = _HiZSrcDepthMip.Load(uint3(srxXY1, _CurrentMipIndex)).x;
+    uint2 srxXY2 = id.xy * 2 + uint2(0, 1); //*2
+    float depth2 = _HiZSrcDepthMip.Load(uint3(srxXY2, _CurrentMipIndex)).x;
+    uint2 srxXY3 = id.xy * 2 + uint2(1, 1); //*2
+    float depth3 = _HiZSrcDepthMip.Load(uint3(srxXY3, _CurrentMipIndex)).x;
+    
+    _HiZDestDepthMip[id.xy] = GetHiZDepeth2x2(depth0, depth1, depth2, depth3);
+}
 
 

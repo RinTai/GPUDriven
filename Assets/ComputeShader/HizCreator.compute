@@ -1,0 +1,55 @@
+﻿#pragma kernel InitialHiZ
+#pragma kernel InterHiZ
+
+#pragma enable_d3d11_debug_symbols
+
+//Unity 自动生成的深度纹理
+Texture2D<float> _CameraDepthTexture;
+    
+    uint HiZWidth;
+    uint HiZHeight;
+    
+    float2 _CameraDepthSize;
+    
+    Texture2D<float> HiZSrcDepthMip; //Mip之前的图片
+    RWTexture2D<float> HiZDestDepthMip; //Mip之后的图片
+
+
+float GetHiZDepeth2x2(float depth0,float depth1,float depth2,float depth3)
+{
+    return max(max(depth0, depth1), max(depth2, depth3));
+}
+[numthreads(8 ,8 ,1)]
+void InitialHiZ(uint3 id : SV_DispatchThreadID)
+{
+    //边界处理
+    if(id.x >= HiZWidth || id.y >= HiZHeight)
+    {
+        return;
+    }
+    
+    uint2 srcXY = floor(id.xy * 1.0 * _CameraDepthSize.xy / float2(HiZWidth, HiZHeight));
+    float depth =  _CameraDepthTexture.Load(uint3(srcXY, 0));
+    
+    HiZDestDepthMip[id.xy] = depth;
+}
+
+[numthreads(8,8,1)]
+void InterHiZ (uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= HiZWidth || id.y >= HiZHeight)
+    {
+        return;
+    }
+    
+    uint2 srxXY0 = id.xy << 1; //*2
+    float depth0 = HiZSrcDepthMip.Load(uint3(srxXY0, 0)).x;
+    uint2 srxXY1 = id.xy * 2 + uint2(1, 0); //*2
+    float depth1 = HiZSrcDepthMip.Load(uint3(srxXY1, 0)).x;
+    uint2 srxXY2 = id.xy * 2 + uint2(0, 1); //*2
+    float depth2 = HiZSrcDepthMip.Load(uint3(srxXY2, 0)).x;
+    uint2 srxXY3 = id.xy * 2 + uint2(1, 1); //*2
+    float depth3 = HiZSrcDepthMip.Load(uint3(srxXY3, 0)).x;
+    
+    HiZDestDepthMip[id.xy] = GetHiZDepeth2x2(depth0, depth1, depth2, depth3);
+}

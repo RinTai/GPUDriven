@@ -51,7 +51,7 @@ inline int2 GetCamearaNodeXY(GlobalValue gvlaue,float3 cameraWPos, uint LOD, flo
     int nodey = floor(relativePos.z / nodeSize);
     return int2(nodex, nodey);
 }
-inline void GetFrustumPlane(float4 globalValueList[10],  float4 planes[6])
+inline void GetFrustumPlane(float4 globalValueList[10], out float4 planes[6])
 {
     planes[0] = globalValueList[4];
     planes[1] = globalValueList[5];
