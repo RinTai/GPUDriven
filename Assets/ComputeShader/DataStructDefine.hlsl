@@ -5,6 +5,8 @@ struct GlobalValue
 {
     float3 cameraWorldPos;
     float fov;
+    float near;
+    float far;
     
     int MIN_LOD;
     int MAX_LOD;

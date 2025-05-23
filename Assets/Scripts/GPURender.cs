@@ -1,4 +1,5 @@
 using Unity.Mathematics;
+using Unity.VisualScripting;
 using UnityEditor;
 using UnityEditor.Rendering;
 using UnityEngine;
@@ -46,17 +47,17 @@ public class GPURender : ScriptableRendererFeature
             HiZWidth = "HiZWidth",
             HiZHeight = "HiZHeight",
             CameraDepthSize = "_CameraDepthSize",
-            CameraDepthTex = "_CameraDepthTexture";
+            CameraDepthTex = "_CameraDepthTexture",
+            VPMatrixName = "_VPMatrix";
 
-        
 
         GraphicsBuffer DispatchArgsBuffer;
         PingPongBuffer_Graphics PPBuffer;
-        PingPongTexture_Graphics PPTexture;
+        //PingPongTexture_Graphics PPTexture;
         GraphicsBuffer FinalBuffer;
 
         RTHandle CullTexture;
-
+        RTHandle HiZTexture;
         /// <summary>
         /// 初始化
         /// </summary>
@@ -67,7 +68,7 @@ public class GPURender : ScriptableRendererFeature
 
             //这里初始化的是每个Pass的Resource 
             PPBuffer = new PingPongBuffer_Graphics(65536, 4);
-            PPTexture = new PingPongTexture_Graphics(Screen.width, Screen.height, GraphicsFormat.R32_SFloat, true, true);
+            //PPTexture = new PingPongTexture_Graphics(Screen.width, Screen.height, GraphicsFormat.R32_SFloat, true, true);
             FinalBuffer = new GraphicsBuffer(GraphicsBuffer.Target.Append, 65536, 4);
             DispatchArgsBuffer = new GraphicsBuffer(GraphicsBuffer.Target.IndirectArguments, 3, 4);
 
@@ -84,6 +85,15 @@ public class GPURender : ScriptableRendererFeature
               name: "GPUTexture"
             );
 
+            HiZTexture = RTHandles.Alloc(
+                width: Screen.width,
+                height: Screen.height,
+                format: GraphicsFormat.R32_SFloat,
+                enableRandomWrite: true,
+                useMipMap: true,
+                name: "HizeTexture"
+                );
+
 
             //初始化全局的数据
             globalValueList = new Vector4[10];
@@ -97,6 +107,8 @@ public class GPURender : ScriptableRendererFeature
             globalValueList[1].w = 2;
             globalValueList[2].x = 20;
             globalValueList[2].y = 0.1f;
+            globalValueList[2].z = Camera.main.nearClipPlane;
+            globalValueList[2].w = Camera.main.farClipPlane;
 
             //4 - 9 索引上用于表示视锥体的6个面
             Plane[] frustumPlanes = GeometryUtility.CalculateFrustumPlanes(Camera.main);
@@ -124,13 +136,18 @@ public class GPURender : ScriptableRendererFeature
         {
             passData.counts = FinalBuffer.count;
 
+            /*
             PPTexture.Import(ref renderGraph);
             passData.HiZTexHandle = PPTexture.texture_Handle;
             builder.UseTexture(passData.HiZTexHandle.front_buffer_Handle, AccessFlags.ReadWrite);
             builder.UseTexture(passData.HiZTexHandle.back_buffer_Handle, AccessFlags.ReadWrite);
+            */
 
             passData.CullTexHandle = renderGraph.ImportTexture(CullTexture);
             builder.UseTexture(passData.CullTexHandle, AccessFlags.ReadWrite);
+
+            passData.HiZTexHandle = renderGraph.ImportTexture(HiZTexture);
+            builder.UseTexture(passData.HiZTexHandle, AccessFlags.ReadWrite);
 
             passData.DispatchArgsBuffer = renderGraph.ImportBuffer(DispatchArgsBuffer);
             builder.UseBuffer(passData.DispatchArgsBuffer);
@@ -157,7 +174,7 @@ public class GPURender : ScriptableRendererFeature
             public BufferHandle FinalBuffer;
 
             public TextureHandle CullTexHandle;
-            public PingPongTexture_Graphics.PingPongTexture_Handle HiZTexHandle;
+            public TextureHandle HiZTexHandle;
         }
 
         /// <summary>
@@ -168,11 +185,30 @@ public class GPURender : ScriptableRendererFeature
         static void ExecutePass(PassData data, ComputeGraphContext context)
         {
             ComputeCommandBuffer cmd = context.cmd;
+            UpdateData(data, cmd);
             HiZCreate(data, cmd);
-            LODCulling(data, cmd);
-        
+            LODCulling(data, cmd);       
         }
 
+        /// <summary>
+        /// 这个是用来更新一些常量数据的代码 ，因为在执行过程中肯定会有改变
+        /// </summary>
+        /// <param name="data"></param>
+        /// <param name="cmd"></param>
+        static void UpdateData(PassData data,ComputeCommandBuffer cmd)
+        {
+            Matrix4x4 V = Camera.main.worldToCameraMatrix;
+            Matrix4x4 P = Camera.main.projectionMatrix;
+
+            float near = Camera.main.nearClipPlane;
+            float far = Camera.main.farClipPlane;
+
+            P.m22 = (far + near) / (near - far);
+            P.m23 = (2 * far * near) / (near - far);
+
+            Matrix4x4 VP = P * V;
+            cmd.SetComputeMatrixParam(CS_GPULod, VPMatrixName, VP);
+        }
        
         /// <summary>
         /// HiZ的生成
@@ -190,25 +226,24 @@ public class GPURender : ScriptableRendererFeature
             cmd.SetComputeIntParam(CS_GPULod, HiZHeight, Screen.height);
             cmd.SetComputeTextureParam(CS_GPULod, KN_HiZInitial, CameraDepthTex, depthTextureHandle);
             cmd.SetComputeVectorParam(CS_GPULod, CameraDepthSize, new Vector2(Camera.main.pixelWidth, Camera.main.pixelHeight));
-            cmd.SetComputeTextureParam(CS_GPULod, KN_HiZInitial, HiZDestName, data.HiZTexHandle.front_buffer_Handle);
+            cmd.SetComputeTextureParam(CS_GPULod, KN_HiZInitial, HiZDestName, data.HiZTexHandle, 0);
 
             cmd.DispatchCompute(CS_GPULod,
                 KN_HiZInitial,
-                Mathf.CeilToInt(Screen.width / 8),
-                Mathf.CeilToInt(Screen.height / 8),
+                Mathf.CeilToInt(Screen.width / 8) + 1,
+                Mathf.CeilToInt(Screen.height / 8) + 1,
                 1);
 
-            for (int i = 1; i <= 5; i++)
+            for (int i = 1; i <= 8; i++)
             {
                 int width = Screen.width >> i;
                 int height = Screen.height >> i;
 
                 cmd.SetComputeIntParam(CS_GPULod, "CurrentMipIndex", i - 1);
-                cmd.SetComputeTextureParam(CS_GPULod, KN_HiZInter, HiZSrcName, data.HiZTexHandle.front_buffer_Handle, i - 1);
-                cmd.SetComputeTextureParam(CS_GPULod, KN_HiZInter, HiZDestName, data.HiZTexHandle.back_buffer_Handle, i);
-                cmd.DispatchCompute(CS_GPULod, KN_HiZInter, Mathf.CeilToInt(width / 8), Mathf.CeilToInt(height / 8), 1);
+                cmd.SetComputeTextureParam(CS_GPULod, KN_HiZInter, HiZSrcName, data.HiZTexHandle, i - 1);
+                cmd.SetComputeTextureParam(CS_GPULod, KN_HiZInter, HiZDestName, data.HiZTexHandle, i);
+                cmd.DispatchCompute(CS_GPULod, KN_HiZInter, Mathf.CeilToInt(width / 8) + 1, Mathf.CeilToInt(height / 8) + 1, 1);
 
-                data.HiZTexHandle.Swap();
             }
            
             cmd.EndSample("HiZ深度图创建");
@@ -246,6 +281,8 @@ public class GPURender : ScriptableRendererFeature
             cmd.EndSample("初始化Buffer");
 
             cmd.BeginSample("GPUDriven测试开始");
+
+            cmd.SetComputeTextureParam(CS_GPULod, KN_InterBuffer, "_MipHiZMap", data.HiZTexHandle);
 
             for (int i = 0; i <= 5; i++)
             {

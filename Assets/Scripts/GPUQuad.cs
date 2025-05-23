@@ -14,7 +14,6 @@ public class GPUQuad : MonoBehaviour
     CommandBuffer cmd;
 
     public ComputeShader CS_Culling;
-    public ComputeShader CS_HiZ;
 
     int time = 0;
     ComputeBuffer DispatchArgsBuffer;
@@ -75,8 +74,13 @@ public class GPUQuad : MonoBehaviour
         LODCreate();
         if (time == 0)
         {
-            DrawMeshIndirectGraphics();
+         
             time += 1;
+        }
+        if (time == 1)
+        {
+            DrawMeshIndirectGraphics();
+            time++;
         }
     }
 
@@ -115,7 +119,6 @@ public class GPUQuad : MonoBehaviour
     {
         int counts = FinalBuffer.count;
         int[] zeros = new int[counts];
-        cmd.Clear();
 
         int KN_InitialBuffer = CS_Culling.FindKernel("InitialBuffer");//初始化所有顶点的核
         int KN_InterBuffer = CS_Culling.FindKernel("InterBuffer");//细分的核 现在只测试细分能否正常使用
@@ -140,7 +143,6 @@ public class GPUQuad : MonoBehaviour
         cmd.EndSample("初始化Buffer");
 
         cmd.BeginSample("GPUDriven测试开始");
-
 
         for (int i = 0; i <= 5; i++)
         {
@@ -179,42 +181,40 @@ public class GPUQuad : MonoBehaviour
     //Hiz的创建
     void HizCreate()
     {
-        int KN_HiZInitial = CS_HiZ.FindKernel("InitialHiZ");
-        int KN_HiZBuild = CS_HiZ.FindKernel("InterHiZ");
+        int KN_HiZInitial = CS_Culling.FindKernel("InitialHiZ");
+        int KN_HiZBuild = CS_Culling.FindKernel("InterHiZ");
 
         cmd.Clear();
         cmd.BeginSample("HiZ深度图创建");
 
-        cmd.SetComputeIntParam(CS_HiZ, HiZWidth, Screen.width);
-        cmd.SetComputeIntParam(CS_HiZ ,HiZHeight, Screen.height);
+        cmd.SetComputeIntParam(CS_Culling, HiZWidth, Screen.width);
+        cmd.SetComputeIntParam(CS_Culling ,HiZHeight, Screen.height);
 
-        cmd.SetComputeVectorParam(CS_HiZ, CameraDepthSize, new Vector2(Camera.main.pixelWidth, Camera.main.pixelHeight));
-        cmd.SetComputeTextureParam(CS_HiZ, KN_HiZInitial, HiZDestName, HiZTexture);
+        cmd.SetComputeVectorParam(CS_Culling, CameraDepthSize, new Vector2(Camera.main.pixelWidth, Camera.main.pixelHeight));
+        cmd.SetComputeTextureParam(CS_Culling, KN_HiZInitial, HiZDestName, HiZTexture);
 
-        cmd.DispatchCompute(CS_HiZ,
+        cmd.DispatchCompute(CS_Culling,
             KN_HiZInitial,
-            Mathf.CeilToInt(Screen.width / 8),
-            Mathf.CeilToInt(Screen.height / 8),
+            Mathf.CeilToInt(Screen.width / 8 + 1),
+            Mathf.CeilToInt(Screen.height / 8 + 1),
             1);
 
-        for(int i = 1; i <= 5; i++)
+        for(int i = 1; i <= 8; i++)
         {
             int width = Screen.width >> i;
             int height = Screen.height >> i;
       
-            cmd.SetComputeTextureParam(CS_HiZ, KN_HiZBuild, HiZSrcName, HiZTexture, i - 1);
-            cmd.SetComputeTextureParam(CS_HiZ, KN_HiZBuild, HiZDestName, HiZTexture, i);
-            cmd.DispatchCompute(CS_HiZ,
+            cmd.SetComputeTextureParam(CS_Culling, KN_HiZBuild, HiZSrcName, HiZTexture, i - 1);
+            cmd.SetComputeTextureParam(CS_Culling, KN_HiZBuild, HiZDestName, HiZTexture, i);
+            cmd.DispatchCompute(CS_Culling,
            KN_HiZBuild,
-           Mathf.CeilToInt(width / 8),
-           Mathf.CeilToInt(height / 8),
+           Mathf.CeilToInt(width / 8 + 1),
+           Mathf.CeilToInt(height / 8) + 1,
            1);
             
         }
 
         cmd.EndSample("HiZ深度图创建");
-        Graphics.ExecuteCommandBuffer(cmd);
-        cmd.Clear();
     }
 
 
@@ -228,7 +228,7 @@ public class GPUQuad : MonoBehaviour
             EncodeXZLOD((uint)tempUse[i], out uint x, out uint z, out uint LOD);
             GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
             float2 centerPos = GetNodeCenterPos(new uint2(x, z), (int)LOD);
-            cube.transform.position = new Vector3(centerPos.x, 1, centerPos.y);
+            cube.transform.position = new Vector3(centerPos.x, 0, centerPos.y);
 
             float size = GetNodeSizeInLOD((int)LOD);
             cube.transform.localScale = new Vector3(size, size, size);

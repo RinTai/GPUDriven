@@ -29,7 +29,7 @@ void InitialHiZ(uint3 id : SV_DispatchThreadID)
     }
     
     uint2 srcXY = floor(id.xy * 1.0 * _CameraDepthSize.xy / float2(HiZWidth, HiZHeight));
-    float depth =  _CameraDepthTexture.Load(uint3(srcXY, 0));
+    float depth =  _CameraDepthTexture.Load(uint3(srcXY, 0)).x;
     
     HiZDestDepthMip[id.xy] = depth;
 }
